@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "apple-notes-mcp"
+version = "0.1.0"
+description = "Apple Notes MCP Server - Access Apple Notes via Model Context Protocol"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+apple-notes-mcp = "apple_notes_mcp:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["apple_notes_mcp"]
