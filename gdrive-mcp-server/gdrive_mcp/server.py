@@ -335,6 +335,52 @@ def copy_file(file_id: str, new_name: str = None, folder_id: str = None) -> dict
     }
 
 
+def create_google_doc(
+    name: str,
+    content: str,
+    content_type: str = "html",
+    folder_id: str = None,
+) -> dict:
+    """Create a native Google Doc by converting from HTML or plain text.
+
+    Args:
+        name: Document name
+        content: HTML or plain text content to convert
+        content_type: "html" or "text" - format of the input content
+        folder_id: Optional parent folder ID
+    """
+    service = get_drive_service()
+
+    file_metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.document",  # Target: native Google Doc
+    }
+    if folder_id:
+        file_metadata["parents"] = [folder_id]
+
+    # Upload mime type based on content type
+    upload_mime = "text/html" if content_type == "html" else "text/plain"
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(content.encode("utf-8")),
+        mimetype=upload_mime,
+        resumable=True,
+    )
+
+    # Create with conversion enabled
+    file = service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id, name, webViewLink",
+    ).execute()
+
+    return {
+        "id": file["id"],
+        "name": file["name"],
+        "webViewLink": file.get("webViewLink", ""),
+    }
+
+
 # MCP Server setup
 server = Server("gdrive-mcp")
 
@@ -556,6 +602,33 @@ async def list_tools() -> list[Tool]:
                 "required": ["file_id"],
             },
         ),
+        Tool(
+            name="gdrive_create_google_doc",
+            description="Create a native Google Doc by converting from HTML or plain text content.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Document name",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "HTML or plain text content to convert to Google Doc",
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "description": "Format of input content: 'html' or 'text' (default: 'html')",
+                        "enum": ["html", "text"],
+                    },
+                    "folder_id": {
+                        "type": "string",
+                        "description": "Parent folder ID (optional)",
+                    },
+                },
+                "required": ["name", "content"],
+            },
+        ),
     ]
 
 
@@ -614,6 +687,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = copy_file(
                 file_id=arguments["file_id"],
                 new_name=arguments.get("new_name"),
+                folder_id=arguments.get("folder_id"),
+            )
+        elif name == "gdrive_create_google_doc":
+            result = create_google_doc(
+                name=arguments["name"],
+                content=arguments["content"],
+                content_type=arguments.get("content_type", "html"),
                 folder_id=arguments.get("folder_id"),
             )
         else:
