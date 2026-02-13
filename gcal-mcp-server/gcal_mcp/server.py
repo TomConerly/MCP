@@ -52,6 +52,17 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 
+def reauth() -> dict:
+    """Delete existing token and re-authenticate with Google Calendar."""
+    if TOKEN_FILE.exists():
+        TOKEN_FILE.unlink()
+
+    # Trigger new auth flow
+    get_calendar_service()
+
+    return {"success": True, "message": "Re-authenticated successfully with Google Calendar"}
+
+
 def list_calendars() -> list[dict]:
     """List all calendars."""
     service = get_calendar_service()
@@ -179,6 +190,8 @@ def update_event(
     description: str = None,
     location: str = None,
     timezone: str = "America/Los_Angeles",
+    attendees: list[str] = None,
+    add_attendees: list[str] = None,
 ) -> dict:
     """Update an existing calendar event."""
     service = get_calendar_service()
@@ -197,6 +210,15 @@ def update_event(
         event["start"] = {"dateTime": start_time, "timeZone": timezone}
     if end_time is not None:
         event["end"] = {"dateTime": end_time, "timeZone": timezone}
+    if attendees is not None:
+        event["attendees"] = [{"email": email} for email in attendees]
+    if add_attendees is not None:
+        existing = event.get("attendees", [])
+        existing_emails = {a.get("email", "").lower() for a in existing}
+        for email in add_attendees:
+            if email.lower() not in existing_emails:
+                existing.append({"email": email})
+        event["attendees"] = existing
 
     updated = service.events().update(
         calendarId=calendar_id, eventId=event_id, body=event
@@ -208,6 +230,7 @@ def update_event(
         "htmlLink": updated.get("htmlLink", ""),
         "start": updated.get("start", {}),
         "end": updated.get("end", {}),
+        "attendees": [a.get("email", "") for a in updated.get("attendees", [])],
     }
 
 
@@ -286,11 +309,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "time_min": {
                         "type": "string",
-                        "description": "Start time in ISO format (default: now)",
+                        "description": "Start time in RFC 3339 format with timezone offset (e.g., '2024-01-15T00:00:00-08:00' or '2024-01-15T00:00:00Z'). Default: now.",
                     },
                     "time_max": {
                         "type": "string",
-                        "description": "End time in ISO format",
+                        "description": "End time in RFC 3339 format with timezone offset (e.g., '2024-02-01T00:00:00-08:00' or '2024-02-01T00:00:00Z')",
                     },
                     "max_results": {
                         "type": "integer",
@@ -402,6 +425,16 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Timezone (default: 'America/Los_Angeles')",
                     },
+                    "attendees": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Replace all attendees with this list of email addresses",
+                    },
+                    "add_attendees": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Add these email addresses to existing attendees",
+                    },
                 },
                 "required": ["event_id"],
             },
@@ -450,11 +483,11 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "time_min": {
                         "type": "string",
-                        "description": "Start time in ISO format",
+                        "description": "Start time in RFC 3339 format with timezone offset (e.g., '2024-01-15T00:00:00-08:00' or '2024-01-15T00:00:00Z')",
                     },
                     "time_max": {
                         "type": "string",
-                        "description": "End time in ISO format",
+                        "description": "End time in RFC 3339 format with timezone offset (e.g., '2024-02-01T00:00:00-08:00' or '2024-02-01T00:00:00Z')",
                     },
                     "calendar_ids": {
                         "type": "array",
@@ -464,6 +497,11 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["time_min", "time_max"],
             },
+        ),
+        Tool(
+            name="gcal_reauth",
+            description="Re-authenticate with Google Calendar. Use this if you get token expired/revoked errors.",
+            inputSchema={"type": "object", "properties": {}},
         ),
     ]
 
@@ -508,6 +546,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 description=arguments.get("description"),
                 location=arguments.get("location"),
                 timezone=arguments.get("timezone", "America/Los_Angeles"),
+                attendees=arguments.get("attendees"),
+                add_attendees=arguments.get("add_attendees"),
             )
         elif name == "gcal_delete_event":
             result = delete_event(
@@ -525,6 +565,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 time_max=arguments["time_max"],
                 calendar_ids=arguments.get("calendar_ids"),
             )
+        elif name == "gcal_reauth":
+            result = reauth()
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

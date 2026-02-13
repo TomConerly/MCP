@@ -19,6 +19,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive.metadata.readonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 
 CONFIG_DIR = Path.home() / ".config" / "gdrive-mcp"
@@ -52,6 +53,45 @@ def get_drive_service():
             token.write(creds.to_json())
 
     return build("drive", "v3", credentials=creds)
+
+
+def reauth() -> dict:
+    """Delete existing token and re-authenticate with Google Drive."""
+    if TOKEN_FILE.exists():
+        TOKEN_FILE.unlink()
+
+    # Trigger new auth flow
+    get_drive_service()
+
+    return {"success": True, "message": "Re-authenticated successfully with Google Drive"}
+
+
+def get_sheets_service():
+    """Get authenticated Sheets API service."""
+    creds = None
+
+    if TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not CREDENTIALS_FILE.exists():
+                raise FileNotFoundError(
+                    f"Credentials not found at {CREDENTIALS_FILE}. "
+                    "Please download OAuth credentials from Google Cloud Console."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(CREDENTIALS_FILE), SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(TOKEN_FILE, "w") as token:
+            token.write(creds.to_json())
+
+    return build("sheets", "v4", credentials=creds)
 
 
 def list_files(
@@ -381,6 +421,230 @@ def create_google_doc(
     }
 
 
+def list_comments(file_id: str, include_resolved: bool = False) -> list[dict]:
+    """List comments on a file."""
+    service = get_drive_service()
+
+    comments = []
+    page_token = None
+    while True:
+        params = {
+            "fileId": file_id,
+            "fields": "comments(id, content, resolved, author, createdTime, modifiedTime, quotedFileContent, anchor, replies(id, content, author, createdTime, action)),nextPageToken",
+            "pageSize": 100,
+            "includeDeleted": False,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+
+        result = service.comments().list(**params).execute()
+
+        for c in result.get("comments", []):
+            if not include_resolved and c.get("resolved"):
+                continue
+            comment = {
+                "id": c["id"],
+                "content": c.get("content", ""),
+                "resolved": c.get("resolved", False),
+                "author": c.get("author", {}).get("displayName", ""),
+                "createdTime": c.get("createdTime", ""),
+                "modifiedTime": c.get("modifiedTime", ""),
+            }
+            if c.get("quotedFileContent"):
+                comment["quotedText"] = c["quotedFileContent"].get("value", "")
+            if c.get("replies"):
+                comment["replies"] = [
+                    {
+                        "id": r["id"],
+                        "content": r.get("content", ""),
+                        "author": r.get("author", {}).get("displayName", ""),
+                        "createdTime": r.get("createdTime", ""),
+                        "action": r.get("action", ""),
+                    }
+                    for r in c["replies"]
+                ]
+            comments.append(comment)
+
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return comments
+
+
+def create_comment(file_id: str, content: str, quoted_text: str = None) -> dict:
+    """Create a comment on a file."""
+    service = get_drive_service()
+
+    body = {"content": content}
+    if quoted_text:
+        body["quotedFileContent"] = {"value": quoted_text, "mimeType": "text/plain"}
+
+    result = service.comments().create(
+        fileId=file_id,
+        body=body,
+        fields="id, content, author, createdTime",
+    ).execute()
+
+    return {
+        "id": result["id"],
+        "content": result.get("content", ""),
+        "author": result.get("author", {}).get("displayName", ""),
+        "createdTime": result.get("createdTime", ""),
+    }
+
+
+def reply_to_comment(file_id: str, comment_id: str, content: str) -> dict:
+    """Reply to a comment on a file."""
+    service = get_drive_service()
+
+    result = service.replies().create(
+        fileId=file_id,
+        commentId=comment_id,
+        body={"content": content},
+        fields="id, content, author, createdTime",
+    ).execute()
+
+    return {
+        "id": result["id"],
+        "content": result.get("content", ""),
+        "author": result.get("author", {}).get("displayName", ""),
+        "createdTime": result.get("createdTime", ""),
+    }
+
+
+def resolve_comment(file_id: str, comment_id: str, resolved: bool = True) -> dict:
+    """Resolve or unresolve a comment on a file."""
+    service = get_drive_service()
+
+    # To resolve, we create a reply with action "resolve"; to unresolve, action "reopen"
+    action = "resolve" if resolved else "reopen"
+
+    result = service.replies().create(
+        fileId=file_id,
+        commentId=comment_id,
+        body={"content": "", "action": action},
+        fields="id, content, author, createdTime, action",
+    ).execute()
+
+    return {
+        "id": result["id"],
+        "action": result.get("action", ""),
+        "createdTime": result.get("createdTime", ""),
+    }
+
+
+def list_spreadsheet_sheets(file_id: str) -> dict:
+    """List all sheets in a Google Spreadsheet."""
+    service = get_sheets_service()
+
+    spreadsheet = service.spreadsheets().get(
+        spreadsheetId=file_id,
+        fields="properties.title,sheets.properties"
+    ).execute()
+
+    sheets = []
+    for sheet in spreadsheet.get("sheets", []):
+        props = sheet.get("properties", {})
+        sheets.append({
+            "sheetId": props.get("sheetId"),
+            "title": props.get("title"),
+            "index": props.get("index"),
+            "rowCount": props.get("gridProperties", {}).get("rowCount"),
+            "columnCount": props.get("gridProperties", {}).get("columnCount"),
+        })
+
+    return {
+        "spreadsheetId": file_id,
+        "title": spreadsheet.get("properties", {}).get("title"),
+        "sheets": sheets,
+    }
+
+
+def read_spreadsheet_sheet(file_id: str, sheet_name: str = None) -> dict:
+    """Read a specific sheet from a Google Spreadsheet.
+
+    Args:
+        file_id: The spreadsheet ID
+        sheet_name: Name of the sheet to read. If None, reads the first sheet.
+    """
+    service = get_sheets_service()
+
+    # If no sheet name, get the first sheet's name
+    if not sheet_name:
+        spreadsheet = service.spreadsheets().get(
+            spreadsheetId=file_id,
+            fields="sheets.properties.title"
+        ).execute()
+        sheets = spreadsheet.get("sheets", [])
+        if sheets:
+            sheet_name = sheets[0].get("properties", {}).get("title", "Sheet1")
+        else:
+            sheet_name = "Sheet1"
+
+    # Read all data from the sheet
+    result = service.spreadsheets().values().get(
+        spreadsheetId=file_id,
+        range=sheet_name,
+    ).execute()
+
+    values = result.get("values", [])
+
+    return {
+        "spreadsheetId": file_id,
+        "sheetName": sheet_name,
+        "range": result.get("range"),
+        "rowCount": len(values),
+        "values": values,
+    }
+
+
+def read_all_spreadsheet_sheets(file_id: str) -> dict:
+    """Read all sheets from a Google Spreadsheet."""
+    service = get_sheets_service()
+
+    # Get spreadsheet metadata
+    spreadsheet = service.spreadsheets().get(
+        spreadsheetId=file_id,
+        fields="properties.title,sheets.properties.title"
+    ).execute()
+
+    spreadsheet_title = spreadsheet.get("properties", {}).get("title")
+    sheet_names = [
+        sheet.get("properties", {}).get("title")
+        for sheet in spreadsheet.get("sheets", [])
+    ]
+
+    # Build ranges for all sheets
+    ranges = [name for name in sheet_names if name]
+
+    # Batch get all sheets
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=file_id,
+        ranges=ranges,
+    ).execute()
+
+    sheets_data = []
+    for value_range in result.get("valueRanges", []):
+        sheet_range = value_range.get("range", "")
+        # Extract sheet name from range (e.g., "'Sheet Name'!A1:Z100" -> "Sheet Name")
+        sheet_name = sheet_range.split("!")[0].strip("'")
+        values = value_range.get("values", [])
+        sheets_data.append({
+            "sheetName": sheet_name,
+            "range": sheet_range,
+            "rowCount": len(values),
+            "values": values,
+        })
+
+    return {
+        "spreadsheetId": file_id,
+        "title": spreadsheet_title,
+        "sheetCount": len(sheets_data),
+        "sheets": sheets_data,
+    }
+
+
 # MCP Server setup
 server = Server("gdrive-mcp")
 
@@ -629,6 +893,141 @@ async def list_tools() -> list[Tool]:
                 "required": ["name", "content"],
             },
         ),
+        Tool(
+            name="gdrive_list_comments",
+            description="List comments on a Google Drive file (e.g., Google Doc). Returns comment text, author, quoted text, replies, and resolved status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file ID",
+                    },
+                    "include_resolved": {
+                        "type": "boolean",
+                        "description": "Include resolved comments (default: false)",
+                    },
+                },
+                "required": ["file_id"],
+            },
+        ),
+        Tool(
+            name="gdrive_create_comment",
+            description="Add a comment to a Google Drive file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file ID",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The comment text",
+                    },
+                    "quoted_text": {
+                        "type": "string",
+                        "description": "Text from the document to anchor the comment to (optional)",
+                    },
+                },
+                "required": ["file_id", "content"],
+            },
+        ),
+        Tool(
+            name="gdrive_reply_to_comment",
+            description="Reply to an existing comment on a Google Drive file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file ID",
+                    },
+                    "comment_id": {
+                        "type": "string",
+                        "description": "The comment ID to reply to",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The reply text",
+                    },
+                },
+                "required": ["file_id", "comment_id", "content"],
+            },
+        ),
+        Tool(
+            name="gdrive_resolve_comment",
+            description="Resolve or reopen a comment on a Google Drive file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file ID",
+                    },
+                    "comment_id": {
+                        "type": "string",
+                        "description": "The comment ID to resolve/reopen",
+                    },
+                    "resolved": {
+                        "type": "boolean",
+                        "description": "True to resolve, false to reopen (default: true)",
+                    },
+                },
+                "required": ["file_id", "comment_id"],
+            },
+        ),
+        Tool(
+            name="gdrive_list_sheets",
+            description="List all sheets (tabs) in a Google Spreadsheet.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The spreadsheet file ID",
+                    },
+                },
+                "required": ["file_id"],
+            },
+        ),
+        Tool(
+            name="gdrive_read_sheet",
+            description="Read a specific sheet from a Google Spreadsheet. Returns all cell values.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The spreadsheet file ID",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "Name of the sheet to read (optional, defaults to first sheet)",
+                    },
+                },
+                "required": ["file_id"],
+            },
+        ),
+        Tool(
+            name="gdrive_read_all_sheets",
+            description="Read all sheets from a Google Spreadsheet. Returns all cell values from every sheet.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "The spreadsheet file ID",
+                    },
+                },
+                "required": ["file_id"],
+            },
+        ),
+        Tool(
+            name="gdrive_reauth",
+            description="Re-authenticate with Google Drive. Use this if you get token expired/revoked errors.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -696,6 +1095,40 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 content_type=arguments.get("content_type", "html"),
                 folder_id=arguments.get("folder_id"),
             )
+        elif name == "gdrive_list_comments":
+            result = list_comments(
+                file_id=arguments["file_id"],
+                include_resolved=arguments.get("include_resolved", False),
+            )
+        elif name == "gdrive_create_comment":
+            result = create_comment(
+                file_id=arguments["file_id"],
+                content=arguments["content"],
+                quoted_text=arguments.get("quoted_text"),
+            )
+        elif name == "gdrive_reply_to_comment":
+            result = reply_to_comment(
+                file_id=arguments["file_id"],
+                comment_id=arguments["comment_id"],
+                content=arguments["content"],
+            )
+        elif name == "gdrive_resolve_comment":
+            result = resolve_comment(
+                file_id=arguments["file_id"],
+                comment_id=arguments["comment_id"],
+                resolved=arguments.get("resolved", True),
+            )
+        elif name == "gdrive_list_sheets":
+            result = list_spreadsheet_sheets(arguments["file_id"])
+        elif name == "gdrive_read_sheet":
+            result = read_spreadsheet_sheet(
+                file_id=arguments["file_id"],
+                sheet_name=arguments.get("sheet_name"),
+            )
+        elif name == "gdrive_read_all_sheets":
+            result = read_all_spreadsheet_sheets(arguments["file_id"])
+        elif name == "gdrive_reauth":
+            result = reauth()
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

@@ -73,6 +73,18 @@ def get_gmail_service(account: str = "primary"):
     return build("gmail", "v1", credentials=creds)
 
 
+def reauth(account: str = "primary") -> dict:
+    """Delete existing token and re-authenticate with Gmail."""
+    token_file = get_token_file(account)
+    if token_file.exists():
+        token_file.unlink()
+
+    # Trigger new auth flow
+    get_gmail_service(account)
+
+    return {"success": True, "message": f"Re-authenticated successfully with Gmail ({account})"}
+
+
 def list_accounts() -> list[dict]:
     """List configured Gmail accounts."""
     accounts = []
@@ -697,6 +709,16 @@ async def list_tools() -> list[Tool]:
                 "required": ["message_id", "attachment_id"],
             },
         ),
+        Tool(
+            name="gmail_reauth",
+            description="Re-authenticate with Gmail. Use this if you get token expired/revoked errors.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": ACCOUNT_PARAM,
+                },
+            },
+        ),
     ]
 
 
@@ -784,6 +806,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 attachment_id=arguments["attachment_id"],
                 account=account,
             )
+        elif name == "gmail_reauth":
+            result = reauth(account=account)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
